@@ -1,9 +1,10 @@
-import openai
+from openai import OpenAI
 import copy
 import time
 import json
 import sys
 import os
+from typing import List, Dict, Any, Optional
 
 from modules.token_saver import save_tokens
 from modules.helpers import yesno
@@ -13,17 +14,25 @@ from modules import cmd_args
 from modules import tokens
 from modules import paths
 
+# Initialize OpenAI client
+client = OpenAI()
+
+
+    
+# Global state
 create_outline = False
 
-def redact_always(messages):
+def redact_always(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Redact certain messages regardless of content."""
     messages_redact = copy.deepcopy(messages)
     for msg in messages_redact:
         if msg["role"] == "user" and "APPEND_OK" in msg["content"]:
-            msg["content"] = "File appended succesfully"
+            msg["content"] = "File appended successfully"
             break
     return messages_redact
 
-def redact_messages(messages):
+def redact_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Redact sensitive content from messages."""
     messages_redact = copy.deepcopy(messages)
     for msg in messages_redact:
         if msg["role"] == "assistant" and msg["content"] not in [None, "<message redacted>"]:
@@ -34,62 +43,102 @@ def redact_messages(messages):
             break
     return messages_redact
 
-def filter_messages(messages):
-    filtered = []
+def filter_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Filter out certain message types."""
+    return [msg for msg in messages if msg["role"] not in ["git"]]
 
-    for message in messages:
-        if message["role"] not in ["git"]:
-            filtered.append(message)
-
-    return filtered
-
-def save_message_history(conv_id, messages):
+def save_message_history(conv_id: Optional[str], messages: List[Dict[str, Any]]) -> None:
+    """Save message history to a file."""
     if conv_id is not None:
         history_file = paths.relative("history", f"{conv_id}.json")
         with open(history_file, "w") as f:
-            f.write(json.dumps(messages, indent=4))
-
-# ChatGPT API Function
-
+            json.dump(messages, f, indent=4)
 def send_message(
-    message,
-    messages,
-    model = "gpt-3.5-turbo-16k-0613",
-    function_call = "auto",
-    retries = 0,
-    print_message = True,
-    conv_id = None,
-    temp = 1.0,
-):
+    message: Dict[str, Any],
+    messages: List[Dict[str, Any]],
+    model: str = "gpt-4",
+    function_call: Any = "auto",
+    retries: int = 0,
+    print_message: bool = True,
+    conv_id: Optional[str] = None,
+    temp: float = 1.0,
+) -> List[Dict[str, Any]]:
+    """Send a message to OpenAI API with proper error handling and response processing."""
     global create_outline
 
-    # add user message to message list
+    def process_tool_calls(tool_calls) -> List[Dict[str, Any]]:
+        """Helper function to process tool calls and generate responses."""
+        tool_responses = []
+        for tool_call in tool_calls:
+            try:
+                func_name = tool_call["function"]["name"]
+                func_args = json.loads(tool_call["function"]["arguments"])
+                
+                # Get the function from gpt_functions module
+                func = getattr(gpt_functions, func_name)
+                
+                # Handle specific function argument formatting
+                if func_name == "make_tasklist":
+                    if "tasks" in func_args and isinstance(func_args["tasks"], list):
+                        formatted_tasks = []
+                        for task in func_args["tasks"]:
+                            if isinstance(task, dict):
+                                formatted_task = {
+                                    "file_involved": task.get("file_involved", "NO_FILE"),
+                                    "task_description": task.get("task_description", "")
+                                }
+                                formatted_tasks.append(formatted_task)
+                        func_args["tasks"] = formatted_tasks
+                
+                # Call the function and get result
+                result = func(**func_args)
+                
+                # Add the tool response message
+                tool_responses.append({
+                    "tool_call_id": tool_call["id"],
+                    "role": "tool",
+                    "name": func_name,
+                    "content": str(result)
+                })
+            except Exception as e:
+                print(f"Error processing tool call {func_name}: {str(e)}")
+                tool_responses.append({
+                    "tool_call_id": tool_call["id"],
+                    "role": "tool",
+                    "name": func_name,
+                    "content": f"Error: {str(e)}"
+                })
+        return tool_responses
+
+    # Process previous tool calls if any exist
+    last_message = messages[-1] if messages else None
+    if last_message and "tool_calls" in last_message:
+        tool_responses = process_tool_calls(last_message["tool_calls"])
+        messages.extend(tool_responses)
+
+    # Add user message to message list
     messages.append(message)
 
-    # redact old messages when encountering partial output
-    if "No END_OF_FILE_CONTENT" in message["content"]:
-        print("NOTICE:   Partial output detected, redacting messages...")
+    # Handle partial output redaction
+    if message.get("content") and "No END_OF_FILE_CONTENT" in message["content"]:
+        print("NOTICE: Partial output detected, redacting messages...")
         messages[-2]["content"] = "<file content redacted>"
         messages = redact_messages(messages)
 
+    # Get function definitions based on model
     definitions = copy.deepcopy(gpt_functions.get_definitions(model))
 
-    if gpt_functions.active_tasklist != [] or checklist.active_list != []:
-        remove_funcs = [
-            "make_tasklist", # don't take any more task lists if there is one already
-            "project_finished" # don't allow project_finished function when task list is unfinished
-        ]
-
-        definitions = [definition for definition in definitions if definition["name"] not in remove_funcs]
+    # Handle task list and checklist logic
+    if gpt_functions.active_tasklist or checklist.active_list:
+        remove_funcs = ["make_tasklist", "project_finished"]
+        definitions = [d for d in definitions if d["name"] not in remove_funcs]
     else:
-        # remove task_finished function if there is no task currently
-        definitions = [definition for definition in definitions if definition["name"] != "task_finished"]
+        definitions = [d for d in definitions if d["name"] != "task_finished"]
 
-    if gpt_functions.task_operation_performed == False:
-        # remove task_finished until an operation is performed
-        definitions = [definition for definition in definitions if definition["name"] != "task_finished"]
+    if not gpt_functions.task_operation_performed:
+        definitions = [d for d in definitions if d["name"] != "task_finished"]
 
-    # always ask clarifying questions first
+    # Handle outline creation
     if "no-questions" not in cmd_args.args and gpt_functions.clarification_asked < gpt_functions.initial_question_count:
         definitions = [gpt_functions.ask_clarification_func]
         function_call = {
@@ -108,125 +157,106 @@ def send_message(
             })
         gpt_functions.outline_created = True
 
-    # always ask for a task list first
-    elif "no-tasklist" not in cmd_args.args and gpt_functions.tasklist_finished and gpt_functions.tasklist == []:
-        print("TASKLIST: Creating a tasklist...")
-        messages.append({
-            "role": "user",
-            "content": """
-Please create a tasklist for the next steps involved in implementing the project. Don't add tasks that have already been done.
-Explain the task clearly and comprehensively so that there can be no misunderstandings.
-Don't include testing or other operations that require user interaction, unless specifically asked.
-For a trivial project, make just one task"""
-        })
-        definitions = [gpt_functions.make_tasklist_func]
-        function_call = {
-            "name": "make_tasklist",
-            "arguments": "tasks"
-        }
+    # Convert functions to tools format for newer API
+    tools = [{"type": "function", "function": d} for d in definitions] if definitions else None
+    
+    print("GPT-API: Waiting... ", end="", flush=True)
 
-    print("GPT-API:  Waiting... ", end="", flush=True)
-
-    # save message history
+    # Save message history
     save_message_history(conv_id, messages)
 
+    response_message = None  # Initialize response_message
     try:
-        # send prompt to chatgpt
-        response = openai.ChatCompletion.create(
+        # Make API call with updated parameters
+        response = client.chat.completions.create(
             model=model,
             messages=save_tokens(filter_messages(messages)),
-            functions=definitions,
-            function_call=function_call,
+            tools=tools,
+            tool_choice="auto" if function_call == "auto" else {
+                "type": "function",
+                "function": function_call
+            } if function_call != "none" else None,
             temperature=temp,
-            request_timeout=120,
+            timeout=120
         )
 
-        tokens.add(response, model)
-        request_tokens = response["usage"]["total_tokens"] # type: ignore
-        total_tokens = int(tokens.token_usage["total"])
+        # Process tokens and print usage
+        completion_tokens = response.usage.completion_tokens if response.usage else 0
+        prompt_tokens = response.usage.prompt_tokens if response.usage else 0
+        total_tokens = prompt_tokens + completion_tokens
+
+        tokens.add({
+            "usage": {
+                "completion_tokens": completion_tokens,
+                "prompt_tokens": prompt_tokens,
+                "total_tokens": total_tokens
+            }
+        }, model)
+
         token_cost = round(tokens.get_token_cost(model), 2)
-        print(f"OK! (+{request_tokens} tokens, total {total_tokens} / {token_cost} USD)")
-    except openai.error.AuthenticationError: # type: ignore
-        print("\nAuthenticationError: Check your API-key")
-        sys.exit(1)
-    except openai.InvalidRequestError as e: # type: ignore
-        if "maximum context length" in str(e):
-            print("\nNOTICE:   Context limit reached, redacting old messages...")
+        print(f"OK! (+{total_tokens} tokens, total {int(tokens.token_usage['total'])} / {token_cost} USD)")
 
-            # remove last message
-            messages.pop()
+        # Process response
+        messages = redact_always(messages)
+        choice = response.choices[0]
+        message_obj = choice.message
+        
+        # Build response message with proper handling of None content
+        response_message = {
+            "role": message_obj.role,
+            "content": message_obj.content if message_obj.content is not None else ""
+        }
 
-            # redact first unredacted assistant message
-            redacted_messages = redact_messages(messages)
+        # Handle tool calls
+        if message_obj.tool_calls:
+            response_message["tool_calls"] = [{
+                "id": tool_call.id,
+                "type": tool_call.type,
+                "function": {
+                    "name": tool_call.function.name,
+                    "arguments": tool_call.function.arguments
+                }
+            } for tool_call in message_obj.tool_calls]
 
-            # show error if no message could be redacted
-            if redacted_messages == messages:
-                raise
+        messages.append(response_message)
 
-            messages = redacted_messages
-        else:
-            raise
+        # Handle any tool calls in the current response immediately
+        if "tool_calls" in response_message:
+            tool_responses = process_tool_calls(response_message["tool_calls"])
+            messages.extend(tool_responses)
 
-        return send_message(
-            message=message,
-            messages=messages,
-            model=model,
-            function_call=function_call, # type: ignore
-            conv_id=conv_id,
-            print_message=print_message,
-            temp=temp,
-        )
-    except openai.error.PermissionError: # type: ignore
-        raise
-    except TypeError:
-        raise
-    except NameError:
-        raise
     except Exception as e:
+        # Handle errors
         if retries >= 4:
-            raise
+            raise e
 
-        if "You exceeded your current quota" in str(e):
-            if yesno("\n\nERROR:    You have exceeded your OpenAI API quota. Would you like to try again?") == "n":
-                sys.exit(1)
-
-        # if request fails, wait 5 seconds and try again
-        print("\nERROR:    OpenAI request failed... Trying again")
+        print(f"\nERROR: OpenAI request failed... {str(e)}")
+        print("Trying again in 5 seconds...")
         time.sleep(5)
 
-        # remove last message
         messages.pop()
-
-        # save message history
         save_message_history(conv_id, messages)
 
         return send_message(
             message=message,
             messages=messages,
             model=model,
-            function_call=function_call, # type: ignore
+            function_call=function_call,
             retries=retries+1,
             conv_id=conv_id,
             print_message=print_message,
-            temp=temp,
+            temp=temp
         )
 
-    # redact long responses that don't need to be in history
-    messages = redact_always(messages)
-
-    # add response to message list
-    messages.append(response["choices"][0]["message"]) # type: ignore
-
-    # save message history
     save_message_history(conv_id, messages)
 
-    # get message content
-    response_message = response["choices"][0]["message"]["content"] # type: ignore
-
-    # if response includes content, print it out
-    if print_message and response_message != None:
+    # Only print message if there is content and print_message is True
+    if print_message and response_message and response_message.get("content"):
         print("\n## ChatGPT Responded ##\n```\n")
-        print(response_message)
+        print(response_message["content"])
         print("\n```\n")
 
     return messages
+
+# Export global variables
+__all__ = ['create_outline', 'send_message']

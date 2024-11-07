@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 import traceback
-from openai import OpenAI
+import openai
 import shutil
 import random
 import json
@@ -22,6 +22,7 @@ from modules import cmd_args
 from modules import chatgpt
 from modules import tokens
 from modules import paths
+from modules import git
 
 CONFIG = get_config()
 
@@ -56,6 +57,13 @@ def unwrap_comments(content, tags):
 
         # Remove Python-style comments
         content = re.sub(r"#([\s]+)?"+tag+r"$", tag, content, flags=re.MULTILINE)
+    return content
+
+def strip_markdown(content):
+    content = content.strip()
+    if content[0:3] == "```":
+        content = re.sub(r"^\s*```[^\n]+\n", "", content)
+        content = re.sub(r"\n```\s*$", "", content)
     return content
 
 def check_content_format(filename, content):
@@ -169,8 +177,8 @@ def print_task_finished(model):
     tokens.prev_price_total = price_total
 
 def ask_model_switch():
-    if yesno("\nERROR: You don't seem to have access to the GPT-4o API. Would you like to change to GPT-4?") == "y":
-        CONFIG["model"] = "gpt-4"
+    if yesno("\nERROR: You don't seem to have access to the GPT-4 API. Would you like to change to GPT-3.5?") == "y":
+        CONFIG["model"] = "gpt-3.5-turbo-16k-0613"
         save_config(CONFIG)
         return CONFIG["model"]
     else:
@@ -268,7 +276,7 @@ def create_zip():
     print()
 
 # MAIN FUNCTION
-def run_conversation(prompt, model = "gpt-4o", messages = [], conv_id = None, recursive = True, temp = 1.0, extra_messages = []):
+def run_conversation(prompt, model = "gpt-3.5-turbo-16k-0613", messages = [], conv_id = None, recursive = True, temp = 1.0, extra_messages = []):
     if conv_id is None:
         conv_id = numberfile(paths.relative("history"))
 
@@ -299,7 +307,7 @@ def run_conversation(prompt, model = "gpt-4o", messages = [], conv_id = None, re
             temp=temp,
         )
     except Exception as e:
-        if "The model: `gpt-4o` does not exist" in str(e):
+        if "The model: `gpt-4-0613` does not exist" in str(e):
             model = ask_model_switch()
         else:
             raise
@@ -629,7 +637,7 @@ def make_prompt_better(prompt, orig_prompt=None, ask=True, temp = 1.0, messages 
         raise
     except Exception as e:
         better_prompt = prompt
-        if "The model: `gpt-4o does not exist" in str(e):
+        if "The model: `gpt-4-0613` does not exist" in str(e):
             ask_model_switch()
             return make_prompt_better(prompt, ask)
         elif yesno("Unable to make prompt better. Try again?") == "y":
@@ -866,6 +874,7 @@ def run_versions(prompt, args, version_messages, temp, prev_version = 1):
             version_folder = os.path.join(version_dir, f"v{version}")
             filesystem.copytree(codedir(), version_folder)
             filesystem.rmtree(codedir())
+            version_folders.append(version_folder)
 
         # save message history of each version
         version_messages[version] = copy.deepcopy(messages)
@@ -902,7 +911,7 @@ def print_model_info():
 def override_model(model):
     if "model" in cmd_args.args:
         model = str(cmd_args.args["model"])
-        if model in ["gpt-4o", "gpt-4", "4"]:
+        if model in ["gpt-4", "gpt4", "4"]:
             model = "gpt-4-0613"
         elif model in ["gpt-3", "gpt3", "gpt-3.5", "gpt3.5", "3", "3.5"]:
             model = "gpt-3.5-turbo-16k-0613"
@@ -919,7 +928,8 @@ version_messages = {
 }
 
 # GET API KEY
-client = OpenAI(api_key=get_api_key())
+openai.api_key = get_api_key()
+
 # WARN IF THERE IS CODE ALREADY IN THE PROJECT
 if "zip" not in cmd_args.args:
     warn_existing_code()
@@ -945,6 +955,4 @@ else:
 if "git" in cmd_args.args:
     git.init()
 
-# Print the constructed path for the code directory
-print(f"Constructed code directory path: {codedir()}")
 run_versions(prompt, cmd_args.args, version_messages, temp)

@@ -1,4 +1,3 @@
-# Helper functions
 import shutil
 import sys
 import os
@@ -12,6 +11,10 @@ def codedir(filename=""):
         code_base_path = str(cmd_args.args["dir"])
     else:
         code_base_path = paths.relative("code")
+    
+    # Print the constructed path for debugging
+    print(f"Constructed code directory path: {code_base_path}")
+    
     return os.path.join(code_base_path, filename)
 
 def relpath(filepath, base=None):

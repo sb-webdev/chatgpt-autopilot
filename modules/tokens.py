@@ -17,7 +17,7 @@ prev_tokens_total = 0
 prev_price_total = 0
 
 def get_token_price(model, direction):
-    if model == "gpt-4-0613":
+    if model == "gpt-4o":
         token_price_input = 0.03 / 1000
         token_price_output = 0.06 / 1000
     elif model == "gpt-4-32k-0613":

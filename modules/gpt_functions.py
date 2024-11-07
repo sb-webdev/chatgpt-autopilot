@@ -853,7 +853,7 @@ def get_definitions(model):
         "replace_text",
     ]
 
-    if "gpt-4" not in model:
+    if "gpt-4o" not in model:
         func_definitions = [definition for definition in func_definitions if definition["name"] not in gpt3_disallow]
 
     if "no-tasklist" in cmd_args.args or tasklist_skipped == True:

@@ -1,15 +1,29 @@
-import openai
+from openai import OpenAI
 import json
-
+from typing import Tuple, List, Dict, Any
 from modules import tokens
 
-def make_better(prompt, model, temp = 1.0, messages = []):
-    if len(prompt.split(" ")) < 80:
+client = OpenAI()
+
+def make_better(prompt: str, model: str, temp: float = 1.0, messages: List[Dict[str, str]] = []) -> Tuple[str, List[Dict[str, Any]]]:
+    """
+    Improve a prompt using OpenAI's API.
+    
+    Args:
+        prompt: The original prompt to improve
+        model: The OpenAI model to use
+        temp: Temperature for response generation
+        messages: Existing message history, if any
+    
+    Returns:
+        Tuple of (improved prompt, updated message history)
+    """
+    if len(prompt.split()) < 80:
         words = "an 80 word"
     else:
         words = "a more"
 
-    if messages == []:
+    if not messages:
         messages = [
             {
                 "role": "system",
@@ -17,25 +31,20 @@ def make_better(prompt, model, temp = 1.0, messages = []):
             },
             {
                 "role": "user",
-                "content": "Convert this prompt into "+ words +" detailed prompt:\n" + prompt
+                "content": f"Convert this prompt into {words} detailed prompt:\n{prompt}"
             }
         ]
     else:
         messages.append({
             "role": "user",
-            "content": "Please make the following changes to the prompt: " + prompt + "\n\nRespond with the complete, modified version of the prompt."
+            "content": f"Please make the following changes to the prompt: {prompt}\n\nRespond with the complete, modified version of the prompt."
         })
 
-    response = openai.ChatCompletion.create(
-        model=model,
-        messages=messages,
-        temperature=temp,
-        function_call={
-            "name": "give_prompt",
-            "arguments": "prompt"
-        },
-        functions=[
-            {
+    # Define the function/tool for the API
+    tools = [
+        {
+            "type": "function",
+            "function": {
                 "name": "give_prompt",
                 "description": "Give the user the better version of the prompt, in full, including modifications",
                 "parameters": {
@@ -46,18 +55,50 @@ def make_better(prompt, model, temp = 1.0, messages = []):
                             "description": "Better version of the prompt, in full, including modifications. Can include newlines.",
                         },
                     },
-                    "required": ["prompt"],
+                    "required": ["prompt"]
                 }
             }
-        ],
-        request_timeout=60,
-    )
+        }
+    ]
 
-    tokens.add(response, model)
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=temp,
+            tools=tools,
+            tool_choice={
+                "type": "function",
+                "function": {"name": "give_prompt"}
+            },
+            timeout=60
+        )
 
-    message = response["choices"][0]["message"] # type: ignore
-    messages.append(message)
+        # Update token usage
+        tokens.add({
+            "usage": {
+                "completion_tokens": response.usage.completion_tokens,
+                "prompt_tokens": response.usage.prompt_tokens,
+                "total_tokens": response.usage.total_tokens
+            }
+        }, model)
 
-    args = json.loads(message["function_call"]["arguments"]) # type: ignore
+        # Get the message from the response
+        message = response.choices[0].message
+        messages.append({
+            "role": message.role,
+            "content": message.content,
+            "tool_calls": message.tool_calls
+        })
 
-    return (args["prompt"], messages)
+        # Extract the improved prompt from the tool call
+        if message.tool_calls:
+            tool_call = message.tool_calls[0]
+            args = json.loads(tool_call.function.arguments)
+            return args["prompt"], messages
+        else:
+            raise ValueError("No tool call in response")
+
+    except Exception as e:
+        print(f"Error improving prompt: {str(e)}")
+        return prompt, messages  # Return original prompt if something goes wrong
